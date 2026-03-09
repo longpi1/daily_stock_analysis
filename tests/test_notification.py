@@ -22,6 +22,13 @@ from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Keep this test runnable when optional LLM/runtime deps are not installed.
+for optional_module in ("litellm", "json_repair"):
+    try:
+        __import__(optional_module)
+    except ModuleNotFoundError:
+        sys.modules[optional_module] = mock.MagicMock()
+
 from src.config import Config
 from src.notification import NotificationService, NotificationChannel
 import requests

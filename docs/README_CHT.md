@@ -307,6 +307,7 @@ daily_stock_analysis/
 
 ## 聯繫與合作
 - GitHub Issues：[提交 Issue](https://github.com/ZhuLinsen/daily_stock_analysis/issues)
+- 合作郵箱：zhuls345@gmail.com
 
 ## Star History
 **如果覺得有用，請給個 ⭐ Star 支持一下！**
@@ -324,4 +325,3 @@ daily_stock_analysis/
 本項目僅供學習和研究使用，不構成任何投資建議。股市有風險，投資需謹慎。作者不對使用本項目產生的任何損失負責。
 
 ---
-

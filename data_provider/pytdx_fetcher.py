@@ -28,7 +28,7 @@ from tenacity import (
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS
+from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
 import os
 
 logger = logging.getLogger(__name__)
@@ -252,6 +252,12 @@ class PytdxFetcher(BaseFetcher):
         if _is_us_code(stock_code):
             raise DataFetchError(f"PytdxFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
         
+        # 北交所不支持，抛出异常让 DataFetcherManager 切换到其他数据源
+        if is_bse_code(stock_code):
+            raise DataFetchError(
+                f"PytdxFetcher 不支持北交所 {stock_code}，将自动切换其他数据源"
+            )
+        
         market, code = self._get_market_code(stock_code)
         
         # 计算需要获取的交易日数量（估算）
@@ -383,6 +389,10 @@ class PytdxFetcher(BaseFetcher):
         Returns:
             实时行情数据字典，失败返回 None
         """
+        if is_bse_code(stock_code):
+            raise DataFetchError(
+                f"PytdxFetcher 不支持北交所 {stock_code}，将自动切换其他数据源"
+            )
         try:
             market, code = self._get_market_code(stock_code)
             

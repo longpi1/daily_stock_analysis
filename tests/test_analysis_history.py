@@ -9,13 +9,23 @@ A股自选股智能分析系统 - 分析历史存储单元测试
 2. 验证上下文快照保存开关
 """
 
+import json
 import os
+import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock
+
+# Keep this test runnable when optional LLM runtime deps are not installed.
+try:
+    import litellm  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules["litellm"] = MagicMock()
 
 from src.config import Config
 from src.storage import DatabaseManager, AnalysisHistory
 from src.analyzer import AnalysisResult
+from src.services.history_service import HistoryService
 
 
 class AnalysisHistoryTestCase(unittest.TestCase):
@@ -107,6 +117,81 @@ class AnalysisHistoryTestCase(unittest.TestCase):
             if row is None:
                 self.fail("未找到保存的历史记录")
             self.assertIsNone(row.context_snapshot)
+
+    def test_save_analysis_history_persists_model_used(self) -> None:
+        """model_used should be persisted in raw_result for history detail."""
+        result = self._build_result()
+        result.model_used = "gemini/gemini-2.0-flash"
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_003",
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=None,
+            save_snapshot=False
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == "query_003").first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            payload = json.loads(row.raw_result or "{}")
+            self.assertEqual(payload.get("model_used"), "gemini/gemini-2.0-flash")
+
+    def test_history_detail_hides_placeholder_model_used(self) -> None:
+        """Placeholder model values should be normalized to None in detail response."""
+        result = self._build_result()
+        result.model_used = "unknown"
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_004",
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=None,
+            save_snapshot=False
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == "query_004").first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            record_id = row.id
+
+        service = HistoryService(self.db)
+        detail = service.get_history_detail_by_id(record_id)
+        self.assertIsNotNone(detail)
+        self.assertIsNone(detail.get("model_used"))
+
+    def test_history_detail_accepts_dict_raw_result(self) -> None:
+        """_record_to_detail_dict should handle dict raw_result without json.loads errors."""
+        result = self._build_result()
+        result.model_used = "gemini/gemini-2.0-flash"
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_005",
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot=None,
+            save_snapshot=False
+        )
+        self.assertEqual(saved, 1)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == "query_005").first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            row.raw_result = {"model_used": "unknown", "extra": "v"}
+
+            service = HistoryService(self.db)
+            detail = service._record_to_detail_dict(row)
+
+        self.assertIsNotNone(detail)
+        self.assertIsInstance(detail.get("raw_result"), dict)
+        self.assertIsNone(detail.get("model_used"))
 
 
 if __name__ == "__main__":

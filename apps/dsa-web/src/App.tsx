@@ -6,6 +6,7 @@ import SettingsPage from './pages/SettingsPage';
 import LoginPage from './pages/LoginPage';
 import NotFoundPage from './pages/NotFoundPage';
 import ChatPage from './pages/ChatPage';
+import { ApiErrorAlert } from './components/common';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import './App.css';
 
@@ -144,7 +145,9 @@ const AppContent: React.FC = () => {
     if (loadError) {
         return (
             <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-base px-4">
-                <p className="text-sm text-red-400">无法连接到服务器，请检查后端是否正常运行。</p>
+                <div className="w-full max-w-lg">
+                    <ApiErrorAlert error={loadError}/>
+                </div>
                 <button
                     type="button"
                     className="btn-primary"

@@ -1,8 +1,14 @@
 import apiClient from './index';
+import { createApiError, isApiRequestError, parseApiError } from './error';
 
 export interface ChatRequest {
   message: string;
   skills?: string[];
+}
+
+export interface ChatStreamRequest extends ChatRequest {
+  session_id?: string;
+  context?: unknown;
 }
 
 export interface ChatResponse {
@@ -58,5 +64,48 @@ export const agentApi = {
   },
   async deleteChatSession(sessionId: string): Promise<void> {
     await apiClient.delete(`/api/v1/agent/chat/sessions/${sessionId}`);
+  },
+  async chatStream(payload: ChatStreamRequest): Promise<Response> {
+    try {
+      const response = await fetch('/api/v1/agent/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        return response;
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      let responseData: unknown = null;
+      if (contentType.includes('application/json')) {
+        responseData = await response.json().catch(() => null);
+      } else {
+        responseData = await response.text().catch(() => null);
+      }
+
+      const parsed = parseApiError({
+        response: {
+          status: response.status,
+          statusText: response.statusText,
+          data: responseData,
+        },
+      });
+      throw createApiError(parsed, {
+        response: {
+          status: response.status,
+          statusText: response.statusText,
+          data: responseData,
+        },
+      });
+    } catch (error: unknown) {
+      if (isApiRequestError(error)) {
+        throw error;
+      }
+
+      const parsed = parseApiError(error);
+      throw createApiError(parsed, { cause: error });
+    }
   },
 };

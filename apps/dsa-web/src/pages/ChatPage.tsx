@@ -3,6 +3,14 @@ import { useSearchParams } from 'react-router-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { agentApi } from '../api/agent';
+import {
+  createParsedApiError,
+  getParsedApiError,
+  isApiRequestError,
+  isParsedApiError,
+  type ParsedApiError,
+} from '../api/error';
+import { ApiErrorAlert } from '../components/common';
 import { generateUUID } from '../utils/uuid';
 import type { StrategyInfo, ChatSessionItem } from '../api/agent';
 import { historyApi } from '../api/history';
@@ -64,6 +72,7 @@ const ChatPage: React.FC = () => {
   const [selectedStrategy, setSelectedStrategy] = useState<string>('bull_trend');
   const [progressSteps, setProgressSteps] = useState<ProgressStep[]>([]);
   const [showStrategyDesc, setShowStrategyDesc] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<ParsedApiError | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const initialFollowUpHandled = useRef(false);
 
@@ -213,6 +222,7 @@ const ChatPage: React.FC = () => {
     setInput('');
     setLoading(true);
     setProgressSteps([]);
+    setChatError(null);
 
     const currentSessionId = sessionIdRef.current;
 
@@ -240,20 +250,7 @@ const ChatPage: React.FC = () => {
     }
 
     try {
-      const response = await fetch('/api/v1/agent/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        const detail = (errData as { detail?: string }).detail || `HTTP ${response.status}`;
-        if (response.status === 400 && String(detail).includes('not enabled')) {
-          throw new Error('⚠️ Agent 模式未启用，请在 .env 中设置 AGENT_MODE=true 并重启服务。');
-        }
-        throw new Error(`❌ 服务端错误: ${detail}`);
-      }
+      const response = await agentApi.chatStream(payload);
 
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
@@ -275,17 +272,28 @@ const ChatPage: React.FC = () => {
             if (event.type === 'done') {
               const doneEvent = event as unknown as { type: string; success: boolean; content?: string; error?: string };
               if (doneEvent.success === false) {
-                throw new Error(`❌ 分析失败: ${doneEvent.error || doneEvent.content || '大模型调用出错，请检查 API Key 配置'}`);
+                const parsedStreamError = getParsedApiError(
+                  doneEvent.error || doneEvent.content || '大模型调用出错，请检查 API Key 配置',
+                );
+                throw createParsedApiError({
+                  title: '问股执行失败',
+                  message: parsedStreamError.message,
+                  rawMessage: parsedStreamError.rawMessage,
+                  status: parsedStreamError.status,
+                  category: parsedStreamError.category,
+                });
               }
               finalContent = doneEvent.content ?? '';
             } else if (event.type === 'error') {
-              throw new Error(`❌ 分析出错: ${event.message}`);
+              throw getParsedApiError(event.message || '分析出错');
             } else {
               currentProgressSteps.push(event);
               setProgressSteps((prev) => [...prev, event]);
             }
           } catch (parseErr: unknown) {
-            if ((parseErr as Error).message?.startsWith('❌')) throw parseErr;
+            if (isParsedApiError(parseErr) || isApiRequestError(parseErr)) {
+              throw parseErr;
+            }
           }
         }
       }
@@ -302,15 +310,7 @@ const ChatPage: React.FC = () => {
         },
       ]);
     } catch (error: unknown) {
-      const errMsg = (error as Error).message;
-      const displayMsg =
-        errMsg?.startsWith('⚠️') || errMsg?.startsWith('❌')
-          ? errMsg
-          : `抱歉，发生了错误: ${errMsg || '未知错误'}`;
-      setMessages((prev) => [
-        ...prev,
-        { id: (Date.now() + 1).toString(), role: 'assistant', content: displayMsg },
-      ]);
+      setChatError(getParsedApiError(error));
     } finally {
       setLoading(false);
       setProgressSteps([]);
@@ -638,6 +638,9 @@ const ChatPage: React.FC = () => {
 
         {/* Input area */}
         <div className="p-4 md:p-6 border-t border-white/5 bg-black/20 relative z-20">
+          {chatError ? (
+            <ApiErrorAlert error={chatError} className="mb-3" />
+          ) : null}
           {/* Strategy radio selector with descriptions */}
           {strategies.length > 0 && (
             <div className="mb-3 flex flex-wrap gap-x-5 gap-y-2 items-start">

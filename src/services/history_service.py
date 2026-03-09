@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 from src.storage import DatabaseManager
+from src.utils.data_processing import normalize_model_used, parse_json_field
 
 logger = logging.getLogger(__name__)
 
@@ -196,12 +197,10 @@ class HistoryService:
         """
         Convert an AnalysisHistory ORM record to a detail response dict.
         """
-        raw_result = None
-        if record.raw_result:
-            try:
-                raw_result = json.loads(record.raw_result)
-            except json.JSONDecodeError:
-                raw_result = record.raw_result
+        raw_result = parse_json_field(record.raw_result)
+
+        model_used = (raw_result or {}).get("model_used") if isinstance(raw_result, dict) else None
+        model_used = normalize_model_used(model_used)
 
         context_snapshot = None
         if record.context_snapshot:
@@ -217,6 +216,7 @@ class HistoryService:
             "stock_name": record.name,
             "report_type": record.report_type,
             "created_at": record.created_at.isoformat() if record.created_at else None,
+            "model_used": model_used,
             "analysis_summary": record.analysis_summary,
             "operation_advice": record.operation_advice,
             "trend_prediction": record.trend_prediction,

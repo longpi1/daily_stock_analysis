@@ -218,6 +218,10 @@ class Config:
     # Markdown 转图片（Issue #289）：对不支持 Markdown 的渠道以图片发送
     markdown_to_image_channels: List[str] = field(default_factory=list)  # 逗号分隔：telegram,wechat,custom,email
     markdown_to_image_max_chars: int = 15000  # 超过此长度不转换，避免超大图片
+    md2img_engine: str = "wkhtmltoimage"  # wkhtmltoimage | markdown-to-file (Issue #455, better emoji support)
+
+    # 实时行情预取（Issue #455）：设为 false 可禁用，避免 efinance/akshare_em 全市场拉取
+    prefetch_realtime_quotes: bool = True
 
     # === 数据库配置 ===
     database_path: str = "./data/stock_analysis.db"
@@ -636,6 +640,8 @@ class Config:
                 if c.strip()
             ],
             markdown_to_image_max_chars=int(os.getenv('MARKDOWN_TO_IMAGE_MAX_CHARS', '15000')),
+            md2img_engine=cls._parse_md2img_engine(os.getenv('MD2IMG_ENGINE', 'wkhtmltoimage')),
+            prefetch_realtime_quotes=os.getenv('PREFETCH_REALTIME_QUOTES', 'true').lower() == 'true',
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             save_context_snapshot=os.getenv('SAVE_CONTEXT_SNAPSHOT', 'true').lower() == 'true',
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
@@ -939,6 +945,20 @@ class Config:
             f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'（合法值：cn / us / both）"
         )
         return 'cn'
+
+    @classmethod
+    def _parse_md2img_engine(cls, value: str) -> str:
+        """Parse MD2IMG_ENGINE, fallback to wkhtmltoimage for invalid values (Issue #455)."""
+        v = (value or 'wkhtmltoimage').strip().lower()
+        if v in ('wkhtmltoimage', 'markdown-to-file'):
+            return v
+        if v:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"MD2IMG_ENGINE '{value}' invalid, fallback to 'wkhtmltoimage' "
+                "(valid: wkhtmltoimage | markdown-to-file)"
+            )
+        return 'wkhtmltoimage'
 
     @classmethod
     def _resolve_realtime_source_priority(cls) -> str:

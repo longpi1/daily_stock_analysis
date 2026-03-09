@@ -25,7 +25,8 @@ from src.config import get_config, Config
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.realtime_types import ChipDistribution
-from src.analyzer import GeminiAnalyzer, AnalysisResult, STOCK_NAME_MAP
+from src.analyzer import GeminiAnalyzer, AnalysisResult
+from src.data.stock_mapping import STOCK_NAME_MAP
 from src.notification import NotificationService, NotificationChannel
 from src.search_service import SearchService
 from src.enums import ReportType
@@ -592,7 +593,8 @@ class StockAnalysisPipeline:
             operation_advice="观望",
             success=agent_result.success,
             error_message=agent_result.error if not agent_result.success else None,
-            data_sources=f"agent:{agent_result.provider}"
+            data_sources=f"agent:{agent_result.provider}",
+            model_used=agent_result.model or None,
         )
 
         if agent_result.success and agent_result.dashboard:
@@ -973,7 +975,12 @@ class StockAnalysisPipeline:
             prefetch_count = self.fetcher_manager.prefetch_realtime_quotes(stock_codes)
             if prefetch_count > 0:
                 logger.info(f"已启用批量预取架构：一次拉取全市场数据，{len(stock_codes)} 只股票共享缓存")
-        
+
+        # Issue #455: 预取股票名称，避免并发分析时显示「股票xxxxx」
+        # dry_run 仅做数据拉取，不需要名称预取，避免额外网络开销
+        if not dry_run:
+            self.fetcher_manager.prefetch_stock_names(stock_codes, use_bulk=False)
+
         # 单股推送模式（#55）：从配置读取
         single_stock_notify = getattr(self.config, 'single_stock_notify', False)
         # Issue #119: 从配置读取报告类型
@@ -1082,13 +1089,67 @@ class StockAnalysisPipeline:
                 channels = self.notifier.get_available_channels()
                 context_success = self.notifier.send_to_context(report)
 
+                # Issue #455: Markdown 转图片（与 notification.send 逻辑一致）
+                from src.md2img import markdown_to_image
+
+                channels_needing_image = {
+                    ch for ch in channels
+                    if ch.value in self.notifier._markdown_to_image_channels
+                }
+                non_wechat_channels_needing_image = {
+                    ch for ch in channels_needing_image if ch != NotificationChannel.WECHAT
+                }
+
+                def _get_md2img_hint() -> str:
+                    try:
+                        engine = getattr(get_config(), "md2img_engine", "wkhtmltoimage")
+                    except Exception:
+                        engine = "wkhtmltoimage"
+                    return (
+                        "npm i -g markdown-to-file" if engine == "markdown-to-file"
+                        else "wkhtmltopdf (apt install wkhtmltopdf / brew install wkhtmltopdf)"
+                    )
+
+                image_bytes = None
+                if non_wechat_channels_needing_image:
+                    image_bytes = markdown_to_image(
+                        report, max_chars=self.notifier._markdown_to_image_max_chars
+                    )
+                    if image_bytes:
+                        logger.info(
+                            "Markdown 已转换为图片，将向 %s 发送图片",
+                            [ch.value for ch in non_wechat_channels_needing_image],
+                        )
+                    else:
+                        logger.warning(
+                            "Markdown 转图片失败，将回退为文本发送。请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
+                            _get_md2img_hint(),
+                        )
+
                 # 企业微信：只发精简版（平台限制）
                 wechat_success = False
                 if NotificationChannel.WECHAT in channels:
                     dashboard_content = self.notifier.generate_wechat_dashboard(results)
                     logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
                     logger.debug(f"企业微信推送内容:\n{dashboard_content}")
-                    wechat_success = self.notifier.send_to_wechat(dashboard_content)
+                    wechat_image_bytes = None
+                    if NotificationChannel.WECHAT in channels_needing_image:
+                        wechat_image_bytes = markdown_to_image(
+                            dashboard_content,
+                            max_chars=self.notifier._markdown_to_image_max_chars,
+                        )
+                        if wechat_image_bytes is None:
+                            logger.warning(
+                                "企业微信 Markdown 转图片失败，将回退为文本发送。请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
+                                _get_md2img_hint(),
+                            )
+                    use_image = self.notifier._should_use_image_for_channel(
+                        NotificationChannel.WECHAT, wechat_image_bytes
+                    )
+                    if use_image:
+                        wechat_success = self.notifier._send_wechat_image(wechat_image_bytes)
+                    else:
+                        wechat_success = self.notifier.send_to_wechat(dashboard_content)
 
                 # 其他渠道：发完整报告（避免自定义 Webhook 被 wechat 截断逻辑污染）
                 non_wechat_success = False
@@ -1099,7 +1160,14 @@ class StockAnalysisPipeline:
                     if channel == NotificationChannel.FEISHU:
                         non_wechat_success = self.notifier.send_to_feishu(report) or non_wechat_success
                     elif channel == NotificationChannel.TELEGRAM:
-                        non_wechat_success = self.notifier.send_to_telegram(report) or non_wechat_success
+                        use_image = self.notifier._should_use_image_for_channel(
+                            channel, image_bytes
+                        )
+                        if use_image:
+                            result = self.notifier._send_telegram_photo(image_bytes)
+                        else:
+                            result = self.notifier.send_to_telegram(report)
+                        non_wechat_success = result or non_wechat_success
                     elif channel == NotificationChannel.EMAIL:
                         if stock_email_groups:
                             code_to_emails: Dict[str, Optional[List[str]]] = {}
@@ -1117,17 +1185,45 @@ class StockAnalysisPipeline:
                                 emails_to_results[key].append(r)
                             for key, group_results in emails_to_results.items():
                                 grp_report = self.notifier.generate_dashboard_report(group_results)
-                                if key is None:
-                                    non_wechat_success = self.notifier.send_to_email(grp_report) or non_wechat_success
-                                else:
-                                    non_wechat_success = (
-                                        self.notifier.send_to_email(grp_report, receivers=list(key))
-                                        or non_wechat_success
+                                grp_image_bytes = None
+                                if channel.value in self.notifier._markdown_to_image_channels:
+                                    grp_image_bytes = markdown_to_image(
+                                        grp_report,
+                                        max_chars=self.notifier._markdown_to_image_max_chars,
                                     )
+                                use_image = self.notifier._should_use_image_for_channel(
+                                    channel, grp_image_bytes
+                                )
+                                receivers = list(key) if key is not None else None
+                                if use_image:
+                                    result = self.notifier._send_email_with_inline_image(
+                                        grp_image_bytes, receivers=receivers
+                                    )
+                                else:
+                                    result = self.notifier.send_to_email(
+                                        grp_report, receivers=receivers
+                                    )
+                                non_wechat_success = result or non_wechat_success
                         else:
-                            non_wechat_success = self.notifier.send_to_email(report) or non_wechat_success
+                            use_image = self.notifier._should_use_image_for_channel(
+                                channel, image_bytes
+                            )
+                            if use_image:
+                                result = self.notifier._send_email_with_inline_image(image_bytes)
+                            else:
+                                result = self.notifier.send_to_email(report)
+                            non_wechat_success = result or non_wechat_success
                     elif channel == NotificationChannel.CUSTOM:
-                        non_wechat_success = self.notifier.send_to_custom(report) or non_wechat_success
+                        use_image = self.notifier._should_use_image_for_channel(
+                            channel, image_bytes
+                        )
+                        if use_image:
+                            result = self.notifier._send_custom_webhook_image(
+                                image_bytes, fallback_content=report
+                            )
+                        else:
+                            result = self.notifier.send_to_custom(report)
+                        non_wechat_success = result or non_wechat_success
                     elif channel == NotificationChannel.PUSHPLUS:
                         non_wechat_success = self.notifier.send_to_pushplus(report) or non_wechat_success
                     elif channel == NotificationChannel.SERVERCHAN3:

@@ -58,6 +58,7 @@ class AgentResult:
     total_steps: int = 0
     total_tokens: int = 0
     provider: str = ""
+    model: str = ""                            # comma-separated models used (supports fallback)
     error: Optional[str] = None
 
 
@@ -424,6 +425,7 @@ class AgentExecutor:
 
     def _run_loop(self, messages: List[Dict[str, Any]], tool_decls: List[Dict[str, Any]], start_time: float, tool_calls_log: List[Dict[str, Any]], total_tokens: int, parse_dashboard: bool, progress_callback: Optional[Callable] = None) -> AgentResult:
         provider_used = ""
+        models_used: List[str] = []
 
         for step in range(self.max_steps):
             logger.info(f"Agent step {step + 1}/{self.max_steps}")
@@ -440,6 +442,9 @@ class AgentExecutor:
             response = self.llm_adapter.call_with_tools(messages, tool_decls)
             provider_used = response.provider
             total_tokens += response.usage.get("total_tokens", 0)
+            m = getattr(response, "model", "") or response.provider
+            if m and m != "error":
+                models_used.append(m)
 
             if response.tool_calls:
                 # LLM wants to call tools
@@ -532,7 +537,8 @@ class AgentExecutor:
                     progress_callback({"type": "generating", "step": step + 1, "message": "正在生成最终分析..."})
 
                 final_content = response.content or ""
-                
+                model_str = ", ".join(list(dict.fromkeys(x for x in models_used if x))) if models_used else ""
+
                 if parse_dashboard:
                     dashboard = self._parse_dashboard(final_content)
                     return AgentResult(
@@ -543,6 +549,7 @@ class AgentExecutor:
                         total_steps=step + 1,
                         total_tokens=total_tokens,
                         provider=provider_used,
+                        model=model_str,
                         error=None if dashboard else "Failed to parse dashboard JSON from agent response",
                     )
                 else:
@@ -555,6 +562,7 @@ class AgentExecutor:
                             total_steps=step + 1,
                             total_tokens=total_tokens,
                             provider=provider_used,
+                            model=model_str,
                             error=final_content,
                         )
                     return AgentResult(
@@ -565,11 +573,13 @@ class AgentExecutor:
                         total_steps=step + 1,
                         total_tokens=total_tokens,
                         provider=provider_used,
+                        model=model_str,
                         error=None,
                     )
 
         # Max steps exceeded
         logger.warning(f"Agent hit max steps ({self.max_steps})")
+        model_str = ", ".join(list(dict.fromkeys(x for x in models_used if x))) if models_used else ""
         return AgentResult(
             success=False,
             content="",
@@ -577,6 +587,7 @@ class AgentExecutor:
             total_steps=self.max_steps,
             total_tokens=total_tokens,
             provider=provider_used,
+            model=model_str,
             error=f"Agent exceeded max steps ({self.max_steps})",
         )
 

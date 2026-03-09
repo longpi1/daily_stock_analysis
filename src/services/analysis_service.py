@@ -128,6 +128,7 @@ class AnalysisService:
                 "report_type": "detailed",
                 "current_price": result.current_price,
                 "change_pct": result.change_pct,
+                "model_used": getattr(result, "model_used", None),
             },
             "summary": {
                 "analysis_summary": result.analysis_summary,
